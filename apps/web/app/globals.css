@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #0a0a0b;
+  --color-surface: #141417;
+  --color-surface-2: #1e1e23;
+  --color-line: #2a2a31;
+  --color-accent: #5b8cff;
+  --color-warn: #f5a524;
+  --color-danger: #f05252;
+  --color-ok: #34d399;
+}
+
+html,
+body {
+  background: var(--color-ink);
+  color: #e8e8ea;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The viewer is a dark, full-bleed surface; never let a rubber-band scroll
+   reveal a white page behind the video. */
+html {
+  overscroll-behavior: none;
+}

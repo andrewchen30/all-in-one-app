@@ -1,0 +1,81 @@
+# XcodeGen spec — the .xcodeproj is generated, never committed.
+#
+# Why generated: an .xcodeproj is an opaque, merge-hostile blob. Keeping the
+# real configuration in this file means build settings are reviewable in a diff
+# and cannot drift from what is checked in.
+#
+#   make ios-gen     # regenerate apps/ios/AllInOne.xcodeproj
+#
+name: AllInOne
+
+options:
+  bundleIdPrefix: com.andrewchen
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    # Free provisioning cannot use automatic signing from the command line
+    # without a team, so DEVELOPMENT_TEAM comes from an untracked xcconfig.
+    # Copy Secrets.example.xcconfig to Secrets.xcconfig and fill in your ID.
+    CODE_SIGN_STYLE: Automatic
+
+configs:
+  Debug: debug
+  Release: release
+
+configFiles:
+  Debug: Secrets.xcconfig
+  Release: Secrets.xcconfig
+
+targets:
+  AllInOne:
+    type: application
+    platform: iOS
+
+    sources:
+      - path: Sources
+      # The protocol is shared verbatim with the web app rather than copied,
+      # so the two ends cannot silently diverge.
+      - path: ../../packages/protocol/swift
+        name: Protocol
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrewchen.allinone
+        PRODUCT_NAME: All-in-One
+        DEVELOPMENT_TEAM: $(DEVELOPMENT_TEAM)
+        TARGETED_DEVICE_FAMILY: "1" # iPhone only
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: All-in-One
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+
+        NSCameraUsageDescription: >-
+          用來把這支手機變成寵物攝影機，將即時影像串流到你的其他裝置。
+        NSMicrophoneUsageDescription: >-
+          用來一併傳送環境聲音，方便你聽見寵物的動靜。
+        # Required for direct peer-to-peer connections on the same Wi-Fi, which
+        # is the fast, zero-cost path when both devices are at home.
+        NSLocalNetworkUsageDescription: >-
+          用來在同一個 Wi-Fi 下與觀看端直接連線，避免影像繞經外部伺服器。
+
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+
+        # NOTE: no UIBackgroundModes for camera — iOS does not offer one, and
+        # AVCaptureSession stops when the app backgrounds. The camera node is
+        # designed around staying in the foreground; see docs/ARCHITECTURE.md.

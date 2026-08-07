@@ -1,0 +1,16 @@
+{
+  "name": "all-in-one-app",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.6.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @aio/web dev",
+    "build": "pnpm --filter @aio/protocol build && pnpm --filter @aio/web build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "ios:gen": "xcodegen generate --spec apps/ios/project.yml --project apps/ios"
+  }
+}
