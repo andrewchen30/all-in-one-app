@@ -30,6 +30,80 @@ const DIMENSIONS: Record<QualityPreset, { width: number; height: number; fps: nu
   "1080p30": { width: 1920, height: 1080, fps: 30 },
 };
 
+/**
+ * A camera-free video source: an animated canvas captured as a MediaStream.
+ *
+ * Exists so the pipeline is testable where `getUserMedia` cannot be used —
+ * sandboxed browsers, CI, or a machine with no webcam. The moving elements are
+ * deliberate: a frame counter and a sweeping bar make it obvious at a glance
+ * whether frames are actually arriving at the viewer, which a static test card
+ * cannot tell you.
+ */
+function createSyntheticStream(
+  facing: CameraFacing,
+  quality: QualityPreset,
+): { stream: MediaStream; stop: () => void } {
+  const dim = DIMENSIONS[quality];
+  const canvas = document.createElement("canvas");
+  canvas.width = dim.width;
+  canvas.height = dim.height;
+  const ctx = canvas.getContext("2d")!;
+
+  let frame = 0;
+  const draw = () => {
+    frame++;
+    const t = frame / dim.fps;
+
+    ctx.fillStyle = facing === "back" ? "#101820" : "#201018";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Sweeping bar — smooth motion is the clearest signal that frames flow.
+    const x = ((t * 0.25) % 1) * canvas.width;
+    ctx.fillStyle = "#5b8cff";
+    ctx.fillRect(x - 40, 0, 80, canvas.height);
+
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `bold ${Math.round(canvas.height / 10)}px -apple-system, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText("測試訊號源", canvas.width / 2, canvas.height / 2 - 10);
+    ctx.font = `${Math.round(canvas.height / 16)}px ui-monospace, monospace`;
+    ctx.fillText(
+      `${facing} · ${quality} · frame ${frame}`,
+      canvas.width / 2,
+      canvas.height / 2 + canvas.height / 10,
+    );
+  };
+
+  draw();
+  const timer = setInterval(draw, 1000 / dim.fps);
+  const stream = canvas.captureStream(dim.fps);
+
+  // A silent audio track so the audio negotiation path is exercised too;
+  // without one, an m=audio section never appears in the SDP.
+  let audioCtx: AudioContext | null = null;
+  try {
+    audioCtx = new AudioContext();
+    const dest = audioCtx.createMediaStreamDestination();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0; // audible tones during testing get old fast
+    osc.connect(gain).connect(dest);
+    osc.start();
+    for (const track of dest.stream.getAudioTracks()) stream.addTrack(track);
+  } catch {
+    /* no AudioContext: video-only is still a useful test */
+  }
+
+  return {
+    stream,
+    stop: () => {
+      clearInterval(timer);
+      stream.getTracks().forEach((t) => t.stop());
+      void audioCtx?.close();
+    },
+  };
+}
+
 export default function DevCameraPage() {
   const [deviceId, setDeviceId] = useState("");
   const [token, setToken] = useState("");
@@ -103,11 +177,15 @@ function CameraNode({ deviceId, token }: { deviceId: string; token: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const peerRef = useRef<CameraPeer | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  /** Tears down the synthetic source's canvas timer and AudioContext. Stopping
+   *  the tracks is not enough — the interval would keep drawing forever. */
+  const syntheticStopRef = useRef<(() => void) | null>(null);
   const startedAt = useRef(Date.now());
 
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [viewers, setViewers] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [usingSynthetic, setUsingSynthetic] = useState(false);
   const [log, setLog] = useState<string[]>([]);
 
   const stateRef = useRef<CameraState>({
@@ -142,24 +220,47 @@ function CameraNode({ deviceId, token }: { deviceId: string; token: string }) {
     setLog((l) => [`${new Date().toLocaleTimeString()} ${line}`, ...l].slice(0, 20));
   }, []);
 
-  /** Acquire (or re-acquire) the webcam and reflect real capabilities into the
+  /** Acquire (or re-acquire) a source and reflect its real capabilities into the
    *  state we advertise, so the viewer disables what this node genuinely
-   *  cannot do rather than showing controls that silently no-op. */
+   *  cannot do rather than showing controls that silently no-op.
+   *
+   *  Falls back to the synthetic canvas source when no camera is available, so
+   *  the pipeline stays testable without a webcam or a permission grant. */
   const acquire = useCallback(
     async (facing: CameraFacing, quality: QualityPreset) => {
       const dim = DIMENSIONS[quality];
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: facing === "back" ? "environment" : "user",
-          width: { ideal: dim.width },
-          height: { ideal: dim.height },
-          frameRate: { ideal: dim.fps },
-        },
-        audio: true,
-      });
 
+      // Release the previous source first — including the canvas timer, which
+      // stopping tracks alone would leave running.
+      syntheticStopRef.current?.();
+      syntheticStopRef.current = null;
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+
+      let stream: MediaStream;
+      let synthetic = false;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facing === "back" ? "environment" : "user",
+            width: { ideal: dim.width },
+            height: { ideal: dim.height },
+            frameRate: { ideal: dim.fps },
+          },
+          audio: true,
+        });
+      } catch (camErr) {
+        const synth = createSyntheticStream(facing, quality);
+        stream = synth.stream;
+        syntheticStopRef.current = synth.stop;
+        synthetic = true;
+        addLog(
+          `鏡頭不可用（${camErr instanceof Error ? camErr.name : "error"}），改用測試訊號源`,
+        );
+      }
+
       streamRef.current = stream;
+      setUsingSynthetic(synthetic);
       if (videoRef.current) videoRef.current.srcObject = stream;
 
       const track = stream.getVideoTracks()[0];
@@ -271,13 +372,12 @@ function CameraNode({ deviceId, token }: { deviceId: string; token: string }) {
     let cancelled = false;
 
     (async () => {
-      let stream: MediaStream;
       try {
-        stream = await acquire("back", "720p30");
+        await acquire("back", "720p30");
       } catch (e) {
-        setError(
-          e instanceof Error ? e.message : "無法存取鏡頭（請確認瀏覽器權限）",
-        );
+        // acquire falls back to the synthetic source, so reaching here means
+        // something worse than a missing camera.
+        setError(e instanceof Error ? e.message : "無法建立影像來源");
         return;
       }
       if (cancelled) return;
@@ -293,7 +393,9 @@ function CameraNode({ deviceId, token }: { deviceId: string; token: string }) {
           peer = new CameraPeer({
             sessionId: "camera",
             iceServers,
-            stream,
+            // Read the live stream at offer time: switching camera or quality
+            // replaces it, and a captured value would go stale.
+            getStream: () => streamRef.current!,
             send: (to, msg) => client!.send(to, msg),
             onCommand: (env) => void handleCommand(env),
             onViewerCountChange: (n) => {
@@ -316,6 +418,8 @@ function CameraNode({ deviceId, token }: { deviceId: string; token: string }) {
       cancelled = true;
       client?.stop();
       peer?.closeAll();
+      syntheticStopRef.current?.();
+      syntheticStopRef.current = null;
       streamRef.current?.getTracks().forEach((t) => t.stop());
       peerRef.current = null;
     };
@@ -355,6 +459,7 @@ function CameraNode({ deviceId, token }: { deviceId: string; token: string }) {
             <Stat label="裝置 ID" value={deviceId} />
             <Stat label="訊號通道" value={status} />
             <Stat label="觀看中" value={String(viewers)} />
+            <Stat label="來源" value={usingSynthetic ? "測試訊號源" : "實體鏡頭"} />
             <Stat label="鏡頭" value={s.camera === "back" ? "後" : "前"} />
             <Stat label="畫質" value={s.quality} />
             <Stat

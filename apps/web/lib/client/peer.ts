@@ -81,7 +81,10 @@ function attachIceForwarding(
 interface CameraPeerOptions {
   sessionId: string;
   iceServers: RTCIceServer[];
-  stream: MediaStream;
+  /** A getter, not a value: switching camera or quality re-acquires the stream
+   *  and stops the old tracks. Capturing the MediaStream once meant a viewer
+   *  that joined after a switch was offered already-stopped tracks. */
+  getStream: () => MediaStream;
   send: SendSignal;
   onCommand: (envelope: CommandEnvelope) => void;
   onViewerCountChange: (count: number) => void;
@@ -151,8 +154,9 @@ export class CameraPeer {
     this.peers.set(viewerId, entry);
     this.opts.onViewerCountChange(this.peers.size);
 
-    for (const track of this.opts.stream.getTracks()) {
-      pc.addTrack(track, this.opts.stream);
+    const stream = this.opts.getStream();
+    for (const track of stream.getTracks()) {
+      pc.addTrack(track, stream);
     }
 
     const channel = pc.createDataChannel(CONTROL_CHANNEL_LABEL, {
@@ -272,16 +276,38 @@ export class ViewerPeer {
   private pc: RTCPeerConnection | null = null;
   private candidates: CandidateQueue | null = null;
   private channel: RTCDataChannel | null = null;
+  private helloTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly opts: ViewerPeerOptions) {}
 
-  /** Announce ourselves; the camera responds with an offer. */
-  async hello(): Promise<void> {
-    await this.opts.send("camera", {
-      t: "hello",
-      from: this.opts.sessionId,
-      role: "viewer",
-    });
+  /**
+   * Announce ourselves until the camera offers.
+   *
+   * Signaling delivery is fire-and-forget: publishing to a mailbox nobody is
+   * listening on drops the message silently. A single hello is therefore a
+   * guaranteed hang whenever the viewer arrives before the camera's SSE stream
+   * is established, or when the camera reconnects (its stream is recycled at
+   * maxDuration) in the window between the two. Retrying until an offer lands
+   * is what makes "open the viewer first" work at all.
+   */
+  hello(): void {
+    const announce = () => {
+      void this.opts
+        .send("camera", {
+          t: "hello",
+          from: this.opts.sessionId,
+          role: "viewer",
+        })
+        .catch(() => {});
+    };
+
+    announce();
+    this.helloTimer ??= setInterval(announce, HELLO_RETRY_MS);
+  }
+
+  private stopAnnouncing(): void {
+    if (this.helloTimer) clearInterval(this.helloTimer);
+    this.helloTimer = null;
   }
 
   async handleSignal(msg: SignalMessage): Promise<void> {
@@ -305,7 +331,9 @@ export class ViewerPeer {
   }
 
   private async acceptOffer(sdp: string): Promise<void> {
-    this.close();
+    // Tear down any previous peer but keep announcing: if this negotiation
+    // throws part-way, the retry loop is the only thing that recovers us.
+    this.teardownPeer();
 
     const pc = new RTCPeerConnection({ iceServers: this.opts.iceServers });
     this.pc = pc;
@@ -345,6 +373,9 @@ export class ViewerPeer {
       from: this.opts.sessionId,
       sdp: answer.sdp ?? "",
     });
+
+    // Negotiation completed without throwing — the camera has us now.
+    this.stopAnnouncing();
   }
 
   sendCommand(envelope: CommandEnvelope): boolean {
@@ -391,6 +422,11 @@ export class ViewerPeer {
   }
 
   close(): void {
+    this.stopAnnouncing();
+    this.teardownPeer();
+  }
+
+  private teardownPeer(): void {
     this.channel?.close();
     this.channel = null;
     this.pc?.close();
@@ -398,3 +434,7 @@ export class ViewerPeer {
     this.candidates = null;
   }
 }
+
+/** How often an unanswered viewer re-announces itself. Short enough that
+ *  starting the camera second still feels immediate. */
+const HELLO_RETRY_MS = 2_000;

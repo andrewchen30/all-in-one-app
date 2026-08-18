@@ -149,7 +149,9 @@ function Viewer({ deviceId, token }: { deviceId: string; token: string }) {
           onState: setPeerState,
         });
         peerRef.current = peer;
-        void peer.hello();
+        // Keeps announcing until the camera offers, so opening the viewer
+        // before the camera works instead of hanging forever.
+        peer.hello();
       },
       onSignal: (msg) => void peer?.handleSignal(msg),
     });

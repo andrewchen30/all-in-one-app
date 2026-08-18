@@ -41,7 +41,10 @@ struct AnyToolModule: Identifiable {
     let subtitle: String
     let symbol: String
     let status: ToolStatus
-    let makeRootView: () -> AnyView
+    // Must carry the isolation in the type: `ToolModule.makeRootView` is
+    // MainActor-isolated, and storing it as a plain closure would silently
+    // strip that (a warning today, an error in the Swift 6 language mode).
+    let makeRootView: @MainActor () -> AnyView
 
     init<M: ToolModule>(_ type: M.Type) {
         self.id = M.id
