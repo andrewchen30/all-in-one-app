@@ -12,5 +12,10 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "ios:gen": "xcodegen generate --spec apps/ios/project.yml --project apps/ios"
+  },
+  "pnpm": {
+    "overrides": {
+      "nanoid@<3.3.18": ">=3.3.18"
+    }
   }
 }
